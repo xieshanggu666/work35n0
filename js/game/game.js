@@ -65,15 +65,23 @@ FG.Game = class Game {
 
   // ================= 存档 =================
   serialize() {
+    const cleanTag = (t) => t ? { c: t.c, item: t.item, t0: t.t0 || 0 } : undefined;
     const blds = [];
     for (const b of this.map.buildings.values()) {
       blds.push({
         type: b.type, x: b.x, y: b.y, dir: b.dir, recipe: b.recipe,
         progress: b.progress, slots: b.slots, fluidTanks: b.fluidTanks,
-        items: b.items, held: b.held, phase: b.phase, timer: b.timer,
+        items: b.items.map(it => {
+          const ni = { type: it.type, pos: it.pos, from: it.from };
+          if (it.tag) ni.tag = cleanTag(it.tag);
+          return ni;
+        }),
+        held: b.held ? { type: b.held.type, tag: cleanTag(b.held.tag) } : null,
+        phase: b.phase, timer: b.timer,
         level: b.level, fluidType: b.fluidType, chest: b.chest, oreType: b.oreType,
         consumeCounter: b.consumeCounter, totalCrafted: b.totalCrafted,
-        rr: b.rr, filter: b.filter, demandMode: b.demandMode, status: b.status,
+        rr: b.rr, filter: b.filter, demandMode: b.demandMode,
+        priority: b.priority, status: b.status,
       });
     }
     const ores = this.map.ores.map(row => row.map(c => c ? { type: c.type, amount: c.amount } : null));
@@ -121,8 +129,15 @@ FG.Game = class Game {
       b.progress = sb.progress || 0;
       b.slots = sb.slots || { inputs: {}, outputs: {} };
       b.fluidTanks = sb.fluidTanks || {};
-      b.items = (sb.items || []).map(it => ({ type: it.type, pos: it.pos, from: it.from || 0 }));
-      b.held = sb.held || null;
+      b.items = (sb.items || []).map(it => {
+        const ni = { type: it.type, pos: it.pos, from: it.from || 0 };
+        if (it.tag) ni.tag = { c: it.tag.c, item: it.tag.item, t0: it.tag.t0 || 0 }; // 在途预留
+        return ni;
+      });
+      b.held = sb.held ? {
+        type: sb.held.type,
+        tag: sb.held.tag ? { c: sb.held.tag.c, item: sb.held.tag.item, t0: sb.held.tag.t0 || 0 } : null,
+      } : null;
       b.phase = sb.phase || 'rest';
       b.timer = sb.timer || 4;
       b.level = sb.level || 0;
@@ -134,6 +149,7 @@ FG.Game = class Game {
       b.rr = sb.rr || 0;
       b.filter = sb.filter || null;
       b.demandMode = !!sb.demandMode;
+      b.priority = FG.Config.PRIORITIES[sb.priority] ? sb.priority : 'normal'; // 旧存档默认普通
       b.status = sb.status || 'idle';
       // 旧存档箱子槽位补齐
       if (b.def.storage) {
@@ -309,6 +325,7 @@ FG.Game = class Game {
 
   removeBuilding(b) {
     // 物料保留：传送带上的在途物品、手中物品、槽位与箱子物料全部落到该格地面堆
+    // 拆建即释放预留：落地前剥离在途预留标签，物料恢复为自由货物可被任何产线取用
     if (b.items) for (const it of b.items) this.map.pileAdd(b.x, b.y, it.type, 1);
     if (b.held) this.map.pileAdd(b.x, b.y, b.held.type, 1);
     if (b.chest) for (const s of b.chest) if (s.count > 0) this.map.pileAdd(b.x, b.y, s.type, s.count);
@@ -325,7 +342,8 @@ FG.Game = class Game {
   setRecipe(b, rid) {
     b.recipe = rid || null;
     b.progress = 0;
-    // 物料保留：不再需要的输入/输出槽不再删除，残留物料可继续被机械臂运走
+    // 物料保留：不再需要的输入/输出槽不删除，残留物料可继续被机械臂运走；
+    // 指向旧配方物品的在途预留标签由调度器在下一 tick 自动剥离（释放给其他产线）
     FG.Map.syncRecipeSlots(b);
     FG.Events.emit('recipe:change', b);
   }

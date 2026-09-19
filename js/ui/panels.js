@@ -74,6 +74,7 @@ FG.Panels = (() => {
         ${b.def.inserterTier !== undefined ? `<div class="k">按需供给</div><div class="v">${b.demandMode ? '开' : '关'}</div>` : ''}
         ${b.type === 'miner' ? `<div class="k">矿种</div><div class="v">${b.oreType ? FG.Items.byId(b.oreType).name : '无'}</div>` : ''}
         ${b.type === 'miner' && b.oreType ? `<div class="k">剩余</div><div class="v">${FG.Utils.fmtNum(game.map.amountAt(b.x, b.y))}</div>` : ''}
+        ${b.def.recipeBuilding || b.type === 'lab' ? `<div class="k">供料优先级</div><div class="v">${({ high: '高', normal: '中', low: '低' })[b.priority] || '中'}</div>` : ''}
         ${b.def.recipeBuilding ? `<div class="k">产量</div><div class="v">${FG.Utils.fmtNum(b.totalCrafted)}</div>` : ''}
       </div>
       <div style="color:var(--text-dim);font-size:11px;margin-top:6px;line-height:1.5">${b.def.desc}</div></div>`;
@@ -89,13 +90,26 @@ FG.Panels = (() => {
         + (wanted.size > 5 ? '…' : '');
       h += `<div class="panel-sec"><h4>取放规则</h4>
         <label class="cfg-row"><input type="checkbox" id="ins-demand" ${b.demandMode ? 'checked' : ''}>
-          <span>仅在下游缺料时取放（沿带追踪 ${FG.Config.BELT_TRACE_DEPTH} 格）</span></label>
+          <span>按需供给：按下游缺口数量与在途预留联动（沿带追踪 ${FG.Config.BELT_TRACE_DEPTH} 格）</span></label>
         <div style="font-size:11px;color:var(--text-dim);margin:4px 0 6px">当前需求：<b style="color:var(--accent2)">${needTxt}</b></div>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">筛选物品（点击切换，再点取消）：</div>
         <div class="filter-grid">
           <button class="filter-chip ${b.filter === null ? 'active' : ''}" data-filter="">任意</button>
           ${solids.map(i => `<button class="filter-chip ${b.filter === i.id ? 'active' : ''}" data-filter="${i.id}">${i.name}</button>`).join('')}
         </div></div>`;
+    }
+
+    // 生产线供料优先级（消费者：生产建筑 + 实验室）
+    if (b.def.recipeBuilding || b.type === 'lab') {
+      const cur = b.priority || 'normal';
+      const opts = [['high', '高优先', '缺料时优先供料'], ['normal', '普通', '同级轮转公平供料'], ['low', '低优先', '物料紧张时最后供料']];
+      h += `<div class="panel-sec"><h4>生产线供料优先级</h4>
+        <div class="prio-row">
+          ${opts.map(([id, name, tip]) => `<button class="prio-btn prio-${id} ${cur === id ? 'active' : ''}"
+            data-prio="${id}" title="${tip}">${name}</button>`).join('')}
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.5">
+          料源紧张时高优先级产线先得料，同优先级轮转均分；在途货物自动预留，在带面上以青色环标记。</div></div>`;
     }
 
     // 配方选择
@@ -351,6 +365,14 @@ FG.Panels = (() => {
         const b = FG.game.selection;
         if (!b) return;
         b.filter = el.dataset.filter || null;
+        render();
+      };
+    }
+    for (const el of document.querySelectorAll('.prio-btn')) {
+      el.onclick = () => {
+        const b = FG.game.selection;
+        if (!b) return;
+        b.priority = el.dataset.prio;
         render();
       };
     }

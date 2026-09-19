@@ -145,7 +145,9 @@ FG.Renderer = (() => {
       const p0x = b.x * t, p0y = b.y * t;
       for (const it of b.items) {
         const p = FG.Map.beltPoint(b, it);
-        drawItem(ctx, it.type, p0x + p.x * t, p0y + p.y * t, t * 0.5, 0.95);
+        const ix = p0x + p.x * t, iy = p0y + p.y * t;
+        drawItem(ctx, it.type, ix, iy, t * 0.5, 0.95);
+        if (it.tag) drawReservedRing(ctx, ix, iy, t * 0.28);
       }
     }
     // 地面物料堆（拆除保留的物料）
@@ -157,6 +159,13 @@ FG.Renderer = (() => {
       ctx.lineWidth = 2;
       ctx.strokeRect(b.x * t + 1, b.y * t + 1, t - 2, t - 2);
     }
+  }
+
+  /** 在途预留标记：青色小环（已被某生产线预定的货物） */
+  function drawReservedRing(ct, x, y, r) {
+    ct.strokeStyle = '#37e0d2';
+    ct.lineWidth = 1.4;
+    ct.beginPath(); ct.arc(x, y, r, 0, Math.PI * 2); ct.stroke();
   }
 
   function drawPiles(x0, y0, x1, y1) {
@@ -385,7 +394,10 @@ FG.Renderer = (() => {
       // 夹爪
       ctx.fillStyle = '#c0c8d8';
       ctx.beginPath(); ctx.arc(tipX, tipY, 2.5, 0, Math.PI * 2); ctx.fill();
-      if (b.held) drawItem(ctx, b.held.type, tipX, tipY, 7, 1);
+      if (b.held) {
+        drawItem(ctx, b.held.type, tipX, tipY, 7, 1);
+        if (b.held.tag) drawReservedRing(ctx, tipX, tipY, 5);
+      }
       // 方向标记
       ctx.fillStyle = 'rgba(255,255,255,0.5)';
       ctx.beginPath(); ctx.arc(cx + v.x * 5, cy + v.y * 5, 1.8, 0, Math.PI * 2); ctx.fill();
@@ -420,6 +432,18 @@ FG.Renderer = (() => {
         const first = items[0];
         drawItem(ctx, first.type, cx, cy + 4, 9, 1);
       }
+    }
+
+    // 生产线供料优先级角标（非普通时显示）
+    if (b.priority && b.priority !== 'normal' && (b.def.recipeBuilding || b.type === 'lab')) {
+      const col = b.priority === 'high' ? '#d96a5a' : '#8b93a8';
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(px + t - 5, py + 5, 3.2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#10141c';
+      ctx.font = 'bold 6px Consolas';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(b.priority === 'high' ? 'H' : 'L', px + t - 5, py + 5.5);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
     }
 
     // 状态覆盖层

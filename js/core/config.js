@@ -5,7 +5,7 @@
 window.FG = window.FG || {};
 
 FG.Config = {
-  VERSION: '1.1.0',
+  VERSION: '1.2.0',
 
   // 仿真节拍：每秒 20 tick
   TPS: 20,
@@ -23,6 +23,12 @@ FG.Config = {
   GROUND_PILE_CAP: 200,
   // 机械臂「按需供给」向下游追踪传送带的最大格数
   BELT_TRACE_DEPTH: 8,
+  // 需求追踪可访问的带/臂节点上限（环路保护：预算封顶，避免环路无界遍历）
+  BELT_TRACE_NODES: 64,
+  // 在途预留的最长存活 tick 数（安全网：消费者消失/绕环卡死时自动释放预留）
+  RESV_TTL: 600,
+  // 生产线供料优先级（数值越大越优先，缺料时高优先级先得料；同级轮转公平）
+  PRIORITIES: { low: 1, normal: 2, high: 3 },
   // 机械臂从传送带上抓取时，夹爪到物品的最大距离（格，0~1）
   INSERTER_PICK_REACH: 0.8,
 

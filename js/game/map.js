@@ -87,6 +87,7 @@ FG.Map = class {
       timer: 4,
       filter: null,            // 筛选物品类型（null=不限）
       demandMode: false,       // true=仅在下游缺料时取放
+      priority: 'normal',      // 生产线供料优先级（消费者）：low|normal|high
       // 管道
       level: 0,
       fluidType: null,

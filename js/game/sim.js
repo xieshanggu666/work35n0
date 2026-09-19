@@ -1,11 +1,13 @@
 /**
  * FG.Sim —— 仿真核心
- * 每 tick 依次处理：传送带 → 机械臂 → 流体生产 → 管道扩散 → 生产建筑 → 矿机 → 实验室
+ * 每 tick 依次处理：调度计划 → 传送带 → 机械臂 → 流体生产 → 管道扩散 → 生产建筑 → 矿机 → 实验室
  * 物流模型：
  *  - 传送带物品带「进料侧」，直行/转弯/多路汇入共用同一套路径与间距规则；
  *  - 合流采用目标带轮转（round-robin）选择上游，统一解决抢料与一侧饿死；
  *  - 每个 tick 重置入口占用表，机械臂/合流共用 hasEntryRoom，统一处理拥堵与在途物品；
- *  - 机械臂支持筛选(filter)与「按下游缺料」(demandMode)取放。
+ *  - 机械臂支持筛选(filter)与「按需供给」(demandMode)：由 FG.Scheduler 统一计算
+ *    需求数量（缺口）与在途预留（tag），按生产线优先级 + 同级轮转拨付，
+ *    天然处理环路、多消费者争料、配方切换与拆建预留释放。
  * 扩展方式：新增建筑类型时在此注册到对应列表并实现逻辑
  */
 FG.Sim = class Sim {
@@ -20,15 +22,16 @@ FG.Sim = class Sim {
     this.miners = [];
     this.labs = [];
     this.entryClaims = new Set(); // 本 tick 已被占用的带入口 key
-    this.demandCache = new Map(); // 本 tick 的下游需求缓存 key -> Set|null
+    this.scheduler = null;       // 按需物流调度器（缺口 × 在途预留 × 优先级）
   }
 
-  init(game) { this.game = game; }
+  init(game) { this.game = game; this.scheduler = new FG.Scheduler(this); }
   reset() {
     this.belts.length = 0; this.inserters.length = 0; this.pipes.length = 0;
     this.chests.length = 0; this.fluidProducers.length = 0; this.crafters.length = 0;
     this.miners.length = 0; this.labs.length = 0;
-    this.entryClaims.clear(); this.demandCache.clear();
+    this.entryClaims.clear();
+    if (this.scheduler) this.scheduler.reset();
   }
 
   register(b) {
@@ -54,7 +57,8 @@ FG.Sim = class Sim {
   // ================= 主循环 =================
   tick() {
     this.entryClaims.clear();
-    this.demandCache.clear();
+    // 先重建按需调度计划（缺口/在途预留/优先级拨付），供本 tick 机械臂取放查询
+    this.scheduler.rebuild(this.game.tickCount);
     this.moveBelts();
     this.updateInserters();
     this.updateFluidProducers();
@@ -111,7 +115,7 @@ FG.Sim = class Sim {
         const next = m.buildingAt(nx, ny);
         if (next && next.def.beltTier === undefined) {
           if (next.type === 'chest') {
-            if (this.chestAdd(next, head.type, 1)) dst.items.pop();
+            if (this.chestAdd(next, head.type, 1)) { delete head.tag; dst.items.pop(); }
             else head.pos = 0.99;
           } else {
             head.pos = 0.99; // 生产/科研建筑需经机械臂放入
@@ -120,7 +124,7 @@ FG.Sim = class Sim {
           if (m.pileAt(nx, ny)) {
             // 已有地面堆时继续堆放（无堆则物品停在带端，避免凭空散落）
             const left = m.pileAdd(nx, ny, head.type, 1);
-            if (left === 0) dst.items.pop();
+            if (left === 0) { delete head.tag; dst.items.pop(); }
             else head.pos = 0.99;
           } else {
             head.pos = 0.99;
@@ -144,7 +148,9 @@ FG.Sim = class Sim {
     if (this.entryClaims.has(FG.Utils.key(dst.x, dst.y))) return false;
     this.entryClaims.add(FG.Utils.key(dst.x, dst.y));
     src.items.pop();
-    dst.items.unshift({ type: head.type, pos: 0, from: side });
+    const ni = { type: head.type, pos: 0, from: side };
+    if (head.tag) ni.tag = head.tag; // 在途预留随货转运
+    dst.items.unshift(ni);
     return true;
   }
 
@@ -171,35 +177,46 @@ FG.Sim = class Sim {
 
   // ================= 机械臂 =================
   updateInserters() {
+    // 两阶段：先统一投放（消费者库存本 tick 即时更新），再统一取料。
+    // 取料按「目标可达消费者最高优先级」降序，保证高优先产线在缺口重开的同一 tick
+    // 先于低优先产线争得共享料源（与在途预留联动）。
+    const dropping = [], picking = [];
     for (const b of this.inserters) {
       b.timer--;
-      if (b.held === null) {
-        if (b.timer <= 0) {
-          const item = this.pickSource(b);
-          if (item) { b.held = item; b.timer = b.def.swingTime; b.status = 'working'; }
-          else { b.timer = b.def.swingTime; b.status = 'idle'; }
-        }
-      } else if (b.timer <= 0) {
-        if (this.dropHeld(b)) { b.held = null; b.timer = 4; b.status = 'working'; }
-        else { b.timer = 4; b.status = 'blocked'; } // 目标满/不接受：在手中等待
-      }
+      if (b.held !== null) { if (b.timer <= 0) dropping.push(b); }
+      else if (b.timer <= 0) picking.push(b);
+    }
+    // 阶段 1：投放；投完的臂本 tick 立即回到取料队列（按优先级排序后再抓，原回摆节拍不变）
+    for (const b of dropping) {
+      if (this.dropHeld(b)) { b.held = null; b.timer = 4; b.status = 'working'; picking.push(b); }
+      else { b.timer = 4; b.status = 'blocked'; } // 目标满/不接受：在手中等待
+    }
+    // 投放已改变库存/在途/自由预算：取料前刷新调度计划（路由追踪缓存保留）
+    this.scheduler.refreshAfterDrops(this.game.tickCount);
+    // 阶段 2：取料（需求臂高优先级先取；非需求臂按普通档）
+    picking.sort((a, c) => this.inserterPickPriority(c) - this.inserterPickPriority(a));
+    for (const b of picking) {
+      const item = this.pickSource(b);
+      if (item) { b.held = item; b.timer = b.def.swingTime; b.status = 'working'; }
+      else { b.timer = b.def.swingTime; b.status = 'idle'; }
     }
   }
 
-  /** 当前允许抓取的物品类型集合：null=不限，空集=都不抓，Set=白名单 */
-  inserterWanted(b) {
-    let want = null;
-    if (b.filter) want = new Set([b.filter]);
-    if (b.demandMode) {
-      const v = FG.Utils.dirVec(b.dir);
-      const range = b.def.range || 1;
-      const demand = this.demandAt(b.x + v.x * range, b.y + v.y * range);
-      if (demand === null) return want;          // 下游无需求概念（箱子/空地）：按筛选执行
-      if (want) { for (const t of Array.from(want)) if (!demand.has(t)) want.delete(t); }
-      else want = new Set(demand);
+  /** 取料排序键：需求臂取其可达消费者最高优先级；非需求臂（终端箱子等）归普通档 */
+  inserterPickPriority(b) {
+    if (!b.demandMode) return FG.Config.PRIORITIES.normal;
+    const tr = this.scheduler.traceInserter(b);
+    if (tr.terminal) return FG.Config.PRIORITIES.normal;
+    let p = 0;
+    for (const ck of tr.items) {
+      const c = this.scheduler.consumerByKey.get(ck);
+      if (c) p = Math.max(p, c.priority);
     }
-    return want;
+    return p || FG.Config.PRIORITIES.normal;
   }
+
+  /** 当前允许抓取的物品类型集合：null=不限，空集=都不抓，Set=白名单（由调度器给出） */
+  inserterWanted(b) { return this.scheduler.armWanted(b); }
 
   /** 类型是否在白名单内（want=null 表示不限） */
   static wantedHas(want, type) { return want === null || want.has(type); }
@@ -213,6 +230,11 @@ FG.Sim = class Sim {
     const s = m.buildingAt(sx, sy);
     const want = this.inserterWanted(b);
     const match = (t) => FG.Sim.wantedHas(want, t);
+    // 预留标签是否允许被本臂抓取（调度器校验归属；非需求臂抓到即剥离预留）
+    const tagOK = (item) => {
+      if (!item.tag) return this.scheduler.canTakeType(b, item.type, null);
+      return match(item.type) && this.scheduler.canTakeType(b, item.type, item.tag);
+    };
 
     if (s && s.def.beltTier !== undefined) {
       if (!s.items.length) return null;
@@ -221,39 +243,54 @@ FG.Sim = class Sim {
       let best = -1, bestD = FG.Config.INSERTER_PICK_REACH;
       for (let i = 0; i < s.items.length; i++) {
         const it = s.items[i];
-        if (!match(it.type)) continue;
+        if (!match(it.type) || !tagOK(it)) continue;
         const d = FG.Map.beltPointToEdgeDist(s, it, sideDir);
         if (d <= bestD) { bestD = d; best = i; }
       }
       if (best < 0) return null;
-      return { type: s.items.splice(best, 1)[0].type };
+      const raw = s.items.splice(best, 1)[0];
+      return { type: raw.type, tag: this.scheduler.tagOnPickup(b, raw.type, raw.tag) };
     }
     if (s && s.type === 'chest') {
       for (const slot of s.chest) {
-        if (slot.count > 0 && match(slot.type)) { slot.count--; return { type: slot.type }; }
+        if (slot.count > 0 && match(slot.type) && this.scheduler.canTakeType(b, slot.type, null)) {
+          slot.count--;
+          return { type: slot.type, tag: this.scheduler.tagOnPickup(b, slot.type, null) };
+        }
       }
       return null;
     }
     // 地面物料堆（建筑被拆除后的保留物料）
     const pile = m.pileAt(sx, sy);
     if (pile) {
-      const type = m.pileTake(sx, sy, want ? pickWantedType(want, pile) : null);
-      return type ? { type } : null;
+      // 逐槽挑选白名单内且本臂有抓取额度的物品
+      let type = null;
+      for (const slot of pile) {
+        if (slot.count > 0 && match(slot.type) && this.scheduler.canTakeType(b, slot.type, null)) { type = slot.type; break; }
+      }
+      if (!type) return null;
+      const got = m.pileTake(sx, sy, type);
+      return got ? { type: got, tag: this.scheduler.tagOnPickup(b, got, null) } : null;
     }
     if (s) {
       // 优先取产物，其次取与当前配方无关的残留输入（拆换配方后保留的物料仍可被运走）
+      const take = (count, type) => {
+        if (count >= 1 && match(type) && this.scheduler.canTakeType(b, type, null)) {
+          return { type, tag: this.scheduler.tagOnPickup(b, type, null) };
+        }
+        return null;
+      };
       const outs = s.slots && s.slots.outputs;
       if (outs) {
-        for (const k of Object.keys(outs)) {
-          if (outs[k].count >= 1 && match(k)) { outs[k].count--; return { type: k }; }
-        }
+        for (const k of Object.keys(outs)) { const r = take(outs[k].count, k); if (r) { outs[k].count--; return r; } }
       }
       const ins = s.slots && s.slots.inputs;
       if (ins) {
         const recipe = s.recipe ? FG.Recipes.byId(s.recipe) : null;
         const needed = new Set(recipe ? recipe.ingredients.filter(i => !FG.Items.isFluid(i.item)).map(i => i.item) : []);
         for (const k of Object.keys(ins)) {
-          if (ins[k].count >= 1 && match(k) && !needed.has(k)) { ins[k].count--; return { type: k }; }
+          if (needed.has(k)) continue;
+          const r = take(ins[k].count, k); if (r) { ins[k].count--; return r; }
         }
       }
     }
@@ -268,22 +305,31 @@ FG.Sim = class Sim {
     if (!m.inBounds(tx, ty)) return false;
     const t = m.buildingAt(tx, ty);
     const type = b.held.type;
+    const tag = b.held.tag || null;
     if (t && t.def.beltTier !== undefined) {
       if (range !== 1) return false;
       const side = FG.Map.beltEntrySide(t, b.x, b.y);
       if (side < 0) return false;                 // 正面顶头不可放入
+      if (!this.scheduler.canDrop(b, t, type, tag)) return false;
       if (!this.hasEntryRoom(t)) return false;
       if (this.entryClaims.has(FG.Utils.key(tx, ty))) return false;
       this.entryClaims.add(FG.Utils.key(tx, ty));
-      t.items.unshift({ type, pos: 0, from: side });
+      const ni = { type, pos: 0, from: side };
+      if (tag) ni.tag = tag;                     // 预留继续随货沿带前往消费者
+      t.items.unshift(ni);
       return true;
     }
-    if (t && t.type === 'chest') return this.chestAdd(t, type, 1);
+    if (t && t.type === 'chest') {
+      if (!this.scheduler.canDrop(b, t, type, tag)) return false;
+      if (this.chestAdd(t, type, 1)) return true; // 入终端箱子：预留语义随货释放
+    }
     // 放到地面堆（无建筑时只有该格已有堆才继续堆放，避免误洒）
     if (!t && m.pileAt(tx, ty)) {
+      if (!this.scheduler.canDrop(b, null, type, tag)) return false;
       return m.pileAdd(tx, ty, type, 1) === 0;
     }
     if (t) {
+      if (!this.scheduler.canDrop(b, t, type, tag)) return false;
       const ins = t.slots && t.slots.inputs;
       if (ins && ins[type]) {
         if (ins[type].count < ins[type].cap) { ins[type].count++; return true; }
@@ -307,96 +353,6 @@ FG.Sim = class Sim {
       if (slot.count === 0) { slot.type = type; slot.count = n; return true; }
     }
     return false;
-  }
-
-  // ================= 下游需求分析（机械臂「按需供给」） =================
-  /**
-   * 目标格当前需要哪些固体物品：
-   *  null  = 无需求概念（箱子/空地/地面堆），按需模式不拦截
-   *  Set   = 需要的物品白名单（可为空集=暂不缺料）
-   */
-  demandAt(x, y) {
-    const m = this.game.map;
-    if (!m.inBounds(x, y)) return new Set();
-    const k = FG.Utils.key(x, y);
-    if (this.demandCache.has(k)) return this.demandCache.get(k);
-    let demand;
-    const b = m.buildingAt(x, y);
-    if (!b) demand = m.pileAt(x, y) ? null : new Set();
-    else if (b.type === 'chest') demand = null;
-    else if (b.def.beltTier !== undefined) demand = this.beltDemand(b, new Set([k]), 0);
-    else if (b.def.recipeBuilding) demand = this.buildingDemand(b);
-    else if (b.type === 'lab') demand = this.labDemand(b);
-    else demand = new Set();
-    this.demandCache.set(k, demand);
-    return demand;
-  }
-
-  /** 沿传送带向下游追踪，汇总末端消费者/从该带取料机械臂的需求 */
-  beltDemand(belt, seen, depth) {
-    if (depth >= FG.Config.BELT_TRACE_DEPTH) return new Set();
-    const m = this.game.map;
-    const v = FG.Utils.dirVec(belt.dir);
-    const nx = belt.x + v.x, ny = belt.y + v.y;
-    const out = new Set();
-
-    // 从该带任意侧抓取的机械臂：它们把物品送入哪里，就需要什么
-    for (const ins of this.inserters) {
-      const iv = FG.Utils.dirVec(ins.dir);
-      const r = ins.def.range || 1;
-      // 源格 = 臂位置 - 朝向×range（与 pickSource 一致），源恰为本带任意相邻位
-      const srcX = ins.x - iv.x * r, srcY = ins.y - iv.y * r;
-      if (srcX === belt.x && srcY === belt.y) {
-        const d = this.demandAt(ins.x + iv.x * r, ins.y + iv.y * r);
-        if (d) {
-          let list = d;
-          if (ins.filter) list = d.has(ins.filter) ? new Set([ins.filter]) : new Set();
-          for (const t of list) out.add(t);
-        }
-      }
-    }
-
-    const next = m.buildingAt(nx, ny);
-    if (next && next.def.beltTier !== undefined && FG.Map.beltEntrySide(next, belt.x, belt.y) >= 0) {
-      const nk = FG.Utils.key(nx, ny);
-      if (!seen.has(nk)) { seen.add(nk); for (const t of this.beltDemand(next, seen, depth + 1)) out.add(t); }
-    } else if (next && next.def.recipeBuilding) {
-      for (const t of this.buildingDemand(next)) out.add(t);
-    } else if (next && next.type === 'lab') {
-      for (const t of this.labDemand(next)) out.add(t);
-    } else if (next && next.type === 'chest') {
-      return null; // 终端箱子什么都收
-    } else if (!next && m.pileAt(nx, ny)) {
-      return null;
-    }
-    return out;
-  }
-
-  /** 生产建筑缺料集合：按当前配方保留约 2 轮份的缓冲 */
-  buildingDemand(b) {
-    if (!b.recipe) return new Set();
-    if (!this.game.research.isRecipeUnlocked(b.recipe)) return new Set();
-    const r = FG.Recipes.byId(b.recipe);
-    const out = new Set();
-    for (const ing of r.ingredients) {
-      if (FG.Items.isFluid(ing.item)) continue;
-      const s = b.slots.inputs[ing.item];
-      const have = s ? s.count : 0;
-      if (have < ing.count * 2) out.add(ing.item);
-    }
-    return out;
-  }
-
-  /** 实验室缺料集合：缓冲约 1 个消耗周期（10） */
-  labDemand(b) {
-    const tech = this.game.research.current;
-    if (!tech) return new Set();
-    const out = new Set();
-    for (const pack of Object.keys(tech.cost)) {
-      const s = b.slots.inputs[pack];
-      if (!s || s.count < 10) out.add(pack);
-    }
-    return out;
   }
 
   // ================= 流体生产（水泵/抽油机） =================
@@ -639,10 +595,4 @@ function dirFromTo(fx, fy, tx, ty) {
     if (v.x === dx && v.y === dy) return d;
   }
   return 0;
-}
-
-/** 从地面堆中挑选白名单内第一种物品 */
-function pickWantedType(want, pile) {
-  for (const s of pile) if (s.count > 0 && want.has(s.type)) return s.type;
-  return null;
 }
