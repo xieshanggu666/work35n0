@@ -365,3 +365,16 @@ button.danger:hover { background: #4d2c2c; }
 }
 .filter-chip.active { background: var(--accent2); border-color: var(--accent2); color: #0e1420; font-weight: 600; }
 .slot-row.slot-warn .sl-name { color: var(--orange); }
+
+/* 供料优先级 */
+.prio-row { display: flex; gap: 6px; }
+.prio-btn {
+  flex: 1; padding: 5px 0; font-size: 12px; border-radius: 4px;
+  background: var(--bg); border: 1px solid var(--border); color: var(--text-dim);
+  position: relative;
+}
+.prio-btn::before {
+  content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--pcol); margin-right: 5px; vertical-align: 1px;
+}
+.prio-btn.active { border-color: var(--pcol); color: var(--pcol); font-weight: 600; background: rgba(255,255,255,0.04); }

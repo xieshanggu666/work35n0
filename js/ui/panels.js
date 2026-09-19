@@ -83,19 +83,41 @@ FG.Panels = (() => {
       const solids = FG.Items.list().filter(i => !i.fluid);
       const wanted = FG.game.sim ? FG.game.sim.inserterWanted(b) : null;
       let needTxt = '—';
-      if (wanted === null) needTxt = '任意（终端/箱子）';
-      else if (!wanted.size) needTxt = '下游暂不缺料';
-      else needTxt = Array.from(wanted).slice(0, 5).map(id => FG.Items.byId(id).name).join('、')
-        + (wanted.size > 5 ? '…' : '');
+      if (b.demandMode) {
+        const details = FG.game.sim ? FG.game.sim.armDemandDetails(b) : null;
+        if (details === null) needTxt = '—';
+        else if (!details.length) needTxt = '下游暂不缺料（在途已覆盖）';
+        else {
+          const priName = (p) => (FG.Config.PRIORITIES[p] || FG.Config.PRIORITIES[1]).name;
+          needTxt = details.slice(0, 5)
+            .map(d => `${FG.Items.byId(d.item).name}×${d.need}（${priName(d.priority)}，在途${d.resv}）`)
+            .join('、') + (details.length > 5 ? '…' : '');
+        }
+      } else if (wanted === null) needTxt = '任意（普通模式）';
+      else needTxt = Array.from(wanted).slice(0, 5).map(id => FG.Items.byId(id).name).join('、');
       h += `<div class="panel-sec"><h4>取放规则</h4>
         <label class="cfg-row"><input type="checkbox" id="ins-demand" ${b.demandMode ? 'checked' : ''}>
-          <span>仅在下游缺料时取放（沿带追踪 ${FG.Config.BELT_TRACE_DEPTH} 格）</span></label>
+          <span>按需供给：需求数量与在途预留联动（沿带追踪 ${FG.Config.BELT_TRACE_DEPTH} 格）</span></label>
         <div style="font-size:11px;color:var(--text-dim);margin:4px 0 6px">当前需求：<b style="color:var(--accent2)">${needTxt}</b></div>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">筛选物品（点击切换，再点取消）：</div>
         <div class="filter-grid">
           <button class="filter-chip ${b.filter === null ? 'active' : ''}" data-filter="">任意</button>
           ${solids.map(i => `<button class="filter-chip ${b.filter === i.id ? 'active' : ''}" data-filter="${i.id}">${i.name}</button>`).join('')}
         </div></div>`;
+    }
+
+    // 供料优先级（消费者建筑：按生产线设置）
+    if (b.def.recipeBuilding || b.type === 'lab') {
+      const cur = FG.Config.PRIORITIES[b.priority] || FG.Config.PRIORITIES[1];
+      h += `<div class="panel-sec"><h4>供料优先级</h4>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:5px">
+          同一条带多座建筑争料时，高优先级生产线先补足在途预留，同级轮转公平分配。
+        </div>
+        <div class="prio-row">
+          ${FG.Config.PRIORITIES.map(p => `<button class="prio-btn ${b.priority === p.id ? 'active' : ''}"
+            data-prio="${p.id}" style="--pcol:${p.color}">${p.name}</button>`).join('')}
+        </div>
+        <div style="font-size:11px;margin-top:4px;color:${cur.color}">当前：${cur.name}优先级</div></div>`;
     }
 
     // 配方选择
@@ -345,6 +367,12 @@ FG.Panels = (() => {
     if (dm) dm.onchange = () => {
       const b = FG.game.selection;
       if (b) { b.demandMode = dm.checked; render(); }
+    };
+    for (const el of document.querySelectorAll('.prio-btn')) {
+      el.onclick = () => {
+        const b = FG.game.selection;
+        if (b) { b.priority = Number(el.dataset.prio); render(); }
+      };
     };
     for (const el of document.querySelectorAll('.filter-chip')) {
       el.onclick = () => {

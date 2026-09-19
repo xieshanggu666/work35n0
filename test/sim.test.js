@@ -154,8 +154,15 @@ console.log('\n[5] 机械臂按下游缺料取放（需求驱动）');
   const armB = place('inserter', 33, 27, 2); // 朝南：源(33,26)，目标(33,28)
   armB.demandMode = true;
   ticks(game, 300);
-  ok(furnace.slots.inputs.ironOre.count > 0, '缺料时铁矿被沿带（含转弯）追踪并送入熔炉（' + furnace.slots.inputs.ironOre.count + '）');
-  ok(furnace.slots.inputs.ironOre.count <= 2, '达到 2 轮份缓冲后停止过量供给（' + furnace.slots.inputs.ironOre.count + '）');
+  const lineOre = beltCount(belt0, 'ironOre') + beltCount(corner, 'ironOre') + beltCount(beltS, 'ironOre');
+  ok(furnace.totalCrafted > 0, '缺料时铁矿被沿带（含转弯）追踪并送入熔炉，持续冶炼（' + furnace.totalCrafted + ' 次）');
+  // 在途预留联动：带面或臂B手中的铁矿应预留给该熔炉（resv=cid）
+  let taggedOre = 0;
+  for (const b of [belt0, corner, beltS]) for (const it of b.items) if (it.type === 'ironOre' && it.resv === furnace.cid) taggedOre++;
+  if (armB.held && armB.held.type === 'ironOre' && armB.held.resv === furnace.cid) taggedOre++;
+  ok(taggedOre > 0, '在途铁矿带熔炉预留标记（需求×在途预留联动，' + taggedOre + ' 件）');
+  ok(furnace.slots.inputs.ironOre.count + lineOre <= 3,
+    '在途+槽位仅保留约 1 轮份（' + (furnace.slots.inputs.ironOre.count + lineOre) + '），无过量供给');
   const copperOnLine = beltCount(belt0, 'copperOre') + beltCount(corner, 'copperOre')
     + beltCount(beltS, 'copperOre') + (furnace.slots.inputs.copperOre ? furnace.slots.inputs.copperOre.count : 0);
   ok(copperOnLine === 0, '下游不需要的铜矿不会被按需臂投放到线上');
@@ -250,6 +257,213 @@ console.log('\n[8] 存档恢复：全部调度状态随存档还原');
   let err = null;
   try { ticks(g3, 30); } catch (e) { err = e; }
   ok(!err, '恢复后仿真正常推进' + (err ? '：' + err.stack : ''));
+}
+
+
+// 机械臂几何约定：dir0 北(取南/放北) dir1 东(取西/放东) dir2 南(取北/放南) dir3 西(取东/放西)
+// 侧取公式：臂在带西侧一格朝西(dir3) → 源=带、目标=更西一格；臂在带东侧朝东(dir1) → 源=带、目标=更东。
+
+console.log('\n[9] 环路：按需注入不循环堆积，带圈消费者可持续取料');
+{
+  // 2x2 环：(20,15)东→(21,15)→南(21,16)→西(20,16)→北回
+  place('belt', 20, 15, 1); place('belt', 21, 15, 2);
+  place('belt', 21, 16, 3); place('belt', 20, 16, 0);
+  // 熔炉在环角(20,15)西侧：臂(19,15)朝西 → 源(20,15) 目标(18,15)
+  const fur = place('furnace', 18, 15);
+  fur.recipe = 'smelt:iron'; FG.Map.syncRecipeSlots(fur);
+  const pull = place('inserter', 19, 15, 3); pull.demandMode = true;
+  // 注入：箱子(20,13) 臂(20,14)朝南 → 源(20,13) 目标(20,15)
+  const chest = place('chest', 20, 13);
+  sim.chestAdd(chest, 'ironOre', 100);
+  const inj = place('inserter', 20, 14, 2); inj.demandMode = true;
+
+  let err = null, maxLine = 0, maxFur = 0;
+  try {
+    for (let i = 0; i < 1200; i++) {
+      game.tickOnce();
+      let n = 0;
+      for (const c of [[20,15],[21,15],[21,16],[20,16]]) n += m.buildingAt(c[0], c[1]).items.length;
+      if (n > maxLine) maxLine = n;
+      if (fur.slots.inputs.ironOre.count > maxFur) maxFur = fur.slots.inputs.ironOre.count;
+    }
+  } catch (e) { err = e; }
+  ok(!err, '环路 1200 tick 无异常、不死循环' + (err ? '：' + err.stack : ''));
+  ok(fur.totalCrafted > 0, '环内铁矿被熔炉取走并冶炼（' + fur.totalCrafted + ' 次）');
+  ok(maxFur <= 2, '熔炉缓冲不超过 2（峰值 ' + maxFur + '）');
+  ok(maxLine <= 16, '环路在途不超过总带容（峰值 ' + maxLine + '/16）');
+  ok(chestCount(chest, 'ironOre') > 50,
+     '需求被在途覆盖后停止注入，绝大多数铁矿仍在箱内（剩 ' + chestCount(chest, 'ironOre') + '）');
+}
+
+console.log('\n[10] 多消费者争料：同级轮转公平，高优先级生产线先补');
+{
+  // 公共南北带：箱子(34,18) 臂(34,19)南→ 带(34,20)(34,21)(34,22)
+  const chest = place('chest', 34, 18);
+  sim.chestAdd(chest, 'ironOre', 400);
+  const inj = place('inserter', 34, 19, 2); inj.demandMode = true;
+  place('belt', 34, 20, 2); place('belt', 34, 21, 2); place('belt', 34, 22, 2);
+  // 炉A 西侧：臂(33,21)朝西 → 源(34,21) 目标(32,21)
+  const furA = place('furnace', 32, 21);
+  furA.recipe = 'smelt:iron'; FG.Map.syncRecipeSlots(furA);
+  const armA = place('inserter', 33, 21, 3); armA.demandMode = true;
+  // 炉B 东侧：臂(35,21)朝东 → 源(34,21) 目标(36,21)
+  const furB = place('furnace', 36, 21);
+  furB.recipe = 'smelt:iron'; FG.Map.syncRecipeSlots(furB);
+  const armB = place('inserter', 35, 21, 1); armB.demandMode = true;
+
+  furA.priority = 1; furB.priority = 1;
+  ticks(game, 400);
+  console.log('    同级两炉产量：A', furA.totalCrafted, 'B', furB.totalCrafted);
+  ok(furA.totalCrafted > 0 && furB.totalCrafted > 0, '同级两座熔炉都得到供料（无一侧饿死）');
+  ok(Math.abs(furA.totalCrafted - furB.totalCrafted) <= 4,
+     '同级产量接近（轮转公平，差 ' + Math.abs(furA.totalCrafted - furB.totalCrafted) + '）');
+
+  furA.priority = 0; furB.priority = 2;
+  const ba = furA.totalCrafted, bb = furB.totalCrafted;
+  ticks(game, 600);
+  const da = furA.totalCrafted - ba, db = furB.totalCrafted - bb;
+  console.log('    提级后增量：A(高)', da, 'B(低)', db);
+  ok(da > db, '高优先级生产线供料优先（高 ' + da + ' > 低 ' + db + '）');
+}
+
+console.log('\n[11] 配方切换：在途预留随新配方改判，按需臂改供新原料');
+{
+  // 直供：箱子(40,26) 臂(41,26)朝东 → 熔炉(42,26)
+  const chest = place('chest', 40, 26);
+  sim.chestAdd(chest, 'ironOre', 50);
+  sim.chestAdd(chest, 'copperOre', 50);
+  const arm = place('inserter', 41, 26, 1); arm.demandMode = true;
+  const fur = place('furnace', 42, 26);
+  fur.recipe = 'smelt:iron'; FG.Map.syncRecipeSlots(fur);
+  ticks(game, 60);
+  ok(fur.slots.inputs.ironOre.count > 0 || (arm.held && arm.held.type === 'ironOre'),
+     '铁矿已被按需臂抓起/送入（切配方前）');
+
+  game.setRecipe(fur, 'smelt:copper');
+  const beforeCopper = fur.totalCrafted;
+  let copperPeak = 0, ironAfter = fur.slots.inputs.ironOre.count;
+  for (let i = 0; i < 500; i++) {
+    game.tickOnce();
+    if (fur.slots.inputs.copperOre) copperPeak = Math.max(copperPeak, fur.slots.inputs.copperOre.count);
+  }
+  const copperMade = fur.totalCrafted - beforeCopper;
+  ok(copperMade > 0, '切换后按需臂改供新配方铜矿并即时冶炼（铜板 ' + copperMade + ' 次，铜矿缓冲峰值 ' + copperPeak + '）');
+  ok(fur.totalCrafted > 0, '按铜板配方持续冶炼（' + fur.totalCrafted + ' 次）');
+  ok(fur.slots.inputs.ironOre.count <= ironAfter + 1,
+     '旧铁矿不再被按需供给线追加新矿（仅手中那一件转为残留，共 ' + fur.slots.inputs.ironOre.count + '）');
+}
+
+console.log('\n[12] 拆建：拆除消费者后预留释放，重建的新消费者接管在途');
+{
+  // 注入：箱子(46,24) 臂(46,25)朝南 → 带(46,26)东；炉在西侧 臂(45,26)朝西 → 源(46,26) 目标(44,26)
+  const src = place('chest', 46, 24);
+  sim.chestAdd(src, 'ironOre', 100);
+  const inj = place('inserter', 46, 25, 2); inj.demandMode = true;
+  const belt = place('belt', 46, 26, 1);
+  const fur = place('furnace', 44, 26);
+  fur.recipe = 'smelt:iron'; FG.Map.syncRecipeSlots(fur);
+  const pull = place('inserter', 45, 26, 3); pull.demandMode = true;
+  ticks(game, 200);
+  ok(fur.totalCrafted > 0, '拆除前熔炉正常供料（' + fur.totalCrafted + '）');
+  const oldCid = fur.cid;
+
+  game.removeBuilding(pull);
+  game.removeBuilding(fur);
+  ticks(game, 2);
+  let stale = 0;
+  for (const bb of sim.belts) for (const it of bb.items) if (it.resv === oldCid) stale++;
+  ok(stale === 0, '消费者拆除后其全部在途预留已释放');
+
+  const fur2 = place('furnace', 44, 26);
+  fur2.recipe = 'smelt:iron'; FG.Map.syncRecipeSlots(fur2);
+  const pull2 = place('inserter', 45, 26, 3); pull2.demandMode = true;
+  ticks(game, 500);
+  ok(fur2.totalCrafted > 0, '新消费者接管带网并恢复供料（冶炼 ' + fur2.totalCrafted + ' 次）');
+  let dangling = 0;
+  for (const bb of sim.belts) for (const it of bb.items) {
+    if (it.resv && !sim.buildingByCid(it.resv)) dangling++;
+  }
+  for (const ins of sim.inserters) if (ins.held && ins.held.resv && !sim.buildingByCid(ins.held.resv)) dangling++;
+  ok(dangling === 0, '不存在悬空预留（全部指向现存消费者）');
+}
+
+console.log('\n[13] 直供多臂防重 + 多消费者争料优先级 + 守恒');
+{
+  // 稀缺料：一只箱子只有 2 铁矿，两侧两座熔炉各一条按需直供臂（A 高 / B 低）
+  const chest = place('chest', 52, 30);
+  sim.chestAdd(chest, 'ironOre', 2);
+  const furA = place('furnace', 50, 30);
+  furA.recipe = 'smelt:iron'; FG.Map.syncRecipeSlots(furA); furA.priority = 0;
+  const armA = place('inserter', 51, 30, 3); armA.demandMode = true;
+  const furB = place('furnace', 54, 30);
+  furB.recipe = 'smelt:iron'; FG.Map.syncRecipeSlots(furB); furB.priority = 2;
+  const armB = place('inserter', 53, 30, 1); armB.demandMode = true;
+  ticks(game, 240);
+  const plateA = furA.slots.outputs.ironPlate.count, plateB = furB.slots.outputs.ironPlate.count;
+  const oreA = furA.slots.inputs.ironOre.count, oreB = furB.slots.inputs.ironOre.count;
+  console.log('    2 铁矿稀缺分配：A(高) 铁板', plateA, '铁矿', oreA, '| B(低) 铁板', plateB, '铁矿', oreB);
+  ok(plateA >= 2, '稀缺料优先满足高优先级生产线（高得 ' + plateA + ' 件铁板）');
+  ok(plateB === 0 && oreB === 0, '料不足时低优先级一件不争抢（低得 0）');
+  ok(oreA <= 2, '高优先级也不超量供料（槽位 ≤2）');
+  const total = plateA + plateB + oreA + oreB + chestCount(chest, 'ironOre')
+    + (armA.held ? 1 : 0) + (armB.held ? 1 : 0);
+  ok(total === 2, '稀缺料分配全程守恒（2，实际 ' + total + '）');
+
+  // 料变充裕：补到 8 矿，低优先级也应开工
+  sim.chestAdd(chest, 'ironOre', 8);
+  ticks(game, 400);
+  ok(furB.totalCrafted > 0, '料源补充后低优先级生产线恢复供料（低冶炼 ' + furB.totalCrafted + ' 次）');
+  ok(furA.slots.inputs.ironOre.count <= 2 && furB.slots.inputs.ironOre.count <= 2,
+     '充裕料下两条直供臂也不会重复超量供料（槽位 ≤2）');
+}
+
+console.log('\n[14] 存档：预留/优先级随档恢复，且兼容无这些字段的旧存档');
+{
+  // ---- 14a 新字段完整往返（独立游戏，坐标在 56x40 内）----
+  const g2 = new FG.Game();
+  g2.startWithMap(shallowGen(), null, 'save-new');
+  const furHi = FG.Map.create('furnace', 50, 34);
+  furHi.recipe = 'smelt:iron'; FG.Map.syncRecipeSlots(furHi); furHi.priority = 0;
+  const beltHi = FG.Map.create('belt', 51, 34, 1);
+  beltHi.items.push({ type: 'ironOre', pos: 0.5, from: 0, resv: furHi.cid });
+  const armHi = FG.Map.create('inserter', 49, 34, 1);
+  armHi.demandMode = true; armHi.held = { type: 'ironOre', resv: furHi.cid };
+  for (const b of [furHi, beltHi, armHi]) { g2.map.register(b); g2.sim.register(b); }
+  const data = JSON.parse(JSON.stringify(g2.serialize()));
+  const g3 = new FG.Game();
+  g3.deserialize(data);
+  const f3 = g3.map.buildingAt(50, 34), b3 = g3.map.buildingAt(51, 34), a3 = g3.map.buildingAt(49, 34);
+  ok(f3.cid === furHi.cid && f3.priority === 0, '消费者 cid 与高优先级随档恢复');
+  ok(b3.items[0].resv === furHi.cid, '带面在途预留归属随档恢复');
+  ok(a3.held.resv === furHi.cid, '机械臂手中物品预留随档恢复');
+  const nextNew = FG.Map.create('chest', 52, 34);
+  ok(nextNew.cid !== furHi.cid, '新建筑 cid 不与存档内 cid 冲突');
+
+  // ---- 14b 旧存档（1.1.0：无 cid/priority/resv）----
+  const g4 = new FG.Game();
+  g4.startWithMap(shallowGen(), null, 'legacy');
+  // 箱子(40,36) 臂(41,36)朝东 → 熔炉(42,36)
+  const oldChest = FG.Map.create('chest', 40, 36);
+  const oldArm = FG.Map.create('inserter', 41, 36, 1);
+  oldArm.demandMode = true;
+  const oldFur = FG.Map.create('furnace', 42, 36);
+  oldFur.recipe = 'smelt:iron'; FG.Map.syncRecipeSlots(oldFur);
+  delete oldFur.cid; delete oldFur.priority;
+  for (const b of [oldChest, oldArm, oldFur]) { g4.map.register(b); g4.sim.register(b); }
+  g4.sim.chestAdd(oldChest, 'ironOre', 20);
+  const raw = JSON.parse(JSON.stringify(g4.serialize()));
+  for (const sb of raw.buildings) { delete sb.cid; delete sb.priority; }
+  for (const sb of raw.buildings) for (const it of (sb.items || [])) delete it.resv;
+
+  const g5 = new FG.Game();
+  let err = null;
+  try { g5.deserialize(raw); for (let i = 0; i < 400; i++) g5.tickOnce(); }
+  catch (e) { err = e; }
+  ok(!err, '旧存档读取并推进 400 tick 无异常' + (err ? '：' + err.stack : ''));
+  const f5 = g5.map.buildingAt(42, 36);
+  ok(typeof f5.cid === 'string' && f5.cid.length > 0 && f5.priority === 1,
+     '旧建筑补登 cid 且默认普通优先级');
+  ok(f5.totalCrafted > 0, '旧存档读入后按需调度立即恢复工作（冶炼 ' + f5.totalCrafted + ' 次）');
 }
 
 console.log('\n结果：' + pass + ' 通过, ' + fail + ' 失败');

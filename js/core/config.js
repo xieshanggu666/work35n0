@@ -5,7 +5,7 @@
 window.FG = window.FG || {};
 
 FG.Config = {
-  VERSION: '1.1.0',
+  VERSION: '1.2.0',
 
   // 仿真节拍：每秒 20 tick
   TPS: 20,
@@ -23,6 +23,14 @@ FG.Config = {
   GROUND_PILE_CAP: 200,
   // 机械臂「按需供给」向下游追踪传送带的最大格数
   BELT_TRACE_DEPTH: 8,
+  // 单 tick 预留调度的在途物品扫描总预算（防止巨型环路拖慢）
+  RESERVE_SCAN_BUDGET: 4000,
+  // 供料优先级档位：0=高（优先供料）1=普通 2=低（余量供料）
+  PRIORITIES: [
+    { id: 0, name: '高', color: '#e05c5c' },
+    { id: 1, name: '普通', color: '#e8a33d' },
+    { id: 2, name: '低', color: '#6fa0ef' },
+  ],
   // 机械臂从传送带上抓取时，夹爪到物品的最大距离（格，0~1）
   INSERTER_PICK_REACH: 0.8,
 

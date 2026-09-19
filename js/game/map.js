@@ -71,11 +71,13 @@ FG.Map = class {
     const def = FG.Buildings.byId(type);
     const b = {
       def, type, x, y,
+      cid: 'c' + (FG.Map._nextCid++), // 调度用稳定唯一 ID（预留归属）
       dir: dir || 0,
       status: 'idle',
       // 生产类
       recipe: null,
       progress: 0,
+      priority: 1,              // 供料优先级：0 高 / 1 普通 / 2 低（按生产线设置）
       slots: { inputs: {}, outputs: {} },
       fluidTanks: {},          // 流体缓存罐
       // 传送带：items=[{type,pos,from}]，from 记录进料侧（0背/2左/3右）
@@ -187,4 +189,13 @@ FG.Map = class {
     if (src.x + v.x !== dst.x || src.y + v.y !== dst.y) return false;
     return FG.Map.beltEntrySide(dst, src.x, src.y) >= 0;
   }
+};
+
+/** 消费者建筑稳定 ID 自增计数器（读档时以存档内最大 cid 为基准续号） */
+FG.Map._nextCid = 1;
+
+/** 读档恢复 cid 后推进计数器，保证新建建筑不与存档 ID 冲突 */
+FG.Map.bumpCid = function (cid) {
+  const n = parseInt(String(cid).replace(/^c/, ''), 10);
+  if (Number.isFinite(n) && n >= FG.Map._nextCid) FG.Map._nextCid = n + 1;
 };

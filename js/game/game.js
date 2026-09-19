@@ -68,9 +68,12 @@ FG.Game = class Game {
     const blds = [];
     for (const b of this.map.buildings.values()) {
       blds.push({
-        type: b.type, x: b.x, y: b.y, dir: b.dir, recipe: b.recipe,
+        cid: b.cid, type: b.type, x: b.x, y: b.y, dir: b.dir, recipe: b.recipe,
+        priority: b.priority,
         progress: b.progress, slots: b.slots, fluidTanks: b.fluidTanks,
-        items: b.items, held: b.held, phase: b.phase, timer: b.timer,
+        items: b.items.map(it => ({ type: it.type, pos: it.pos, from: it.from, resv: it.resv || null })),
+        held: b.held ? { type: b.held.type, resv: b.held.resv || null } : null,
+        phase: b.phase, timer: b.timer,
         level: b.level, fluidType: b.fluidType, chest: b.chest, oreType: b.oreType,
         consumeCounter: b.consumeCounter, totalCrafted: b.totalCrafted,
         rr: b.rr, filter: b.filter, demandMode: b.demandMode, status: b.status,
@@ -117,12 +120,15 @@ FG.Game = class Game {
 
     for (const sb of data.buildings) {
       const b = FG.Map.create(sb.type, sb.x, sb.y, sb.dir || 0);
+      // 兼容旧存档：保留存档 cid（预留归属），并把 ID 计数器推到最大值之后
+      if (sb.cid) { b.cid = sb.cid; FG.Map.bumpCid(sb.cid); }
+      if (sb.priority !== undefined) b.priority = sb.priority;
       if (sb.recipe !== undefined) b.recipe = sb.recipe;
       b.progress = sb.progress || 0;
       b.slots = sb.slots || { inputs: {}, outputs: {} };
       b.fluidTanks = sb.fluidTanks || {};
-      b.items = (sb.items || []).map(it => ({ type: it.type, pos: it.pos, from: it.from || 0 }));
-      b.held = sb.held || null;
+      b.items = (sb.items || []).map(it => ({ type: it.type, pos: it.pos, from: it.from || 0, resv: it.resv || null }));
+      b.held = sb.held ? { type: sb.held.type, resv: sb.held.resv || null } : null;
       b.phase = sb.phase || 'rest';
       b.timer = sb.timer || 4;
       b.level = sb.level || 0;

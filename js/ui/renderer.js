@@ -141,11 +141,27 @@ FG.Renderer = (() => {
       }
     }
     // 传送带物品：按转弯/直行折线路径定位
+    const cidPriority = new Map();
+    for (const b of game.map.buildings.values()) {
+      if (b.cid !== undefined) cidPriority.set(b.cid, b.priority);
+    }
     for (const b of belts) {
       const p0x = b.x * t, p0y = b.y * t;
       for (const it of b.items) {
         const p = FG.Map.beltPoint(b, it);
         drawItem(ctx, it.type, p0x + p.x * t, p0y + p.y * t, t * 0.5, 0.95);
+        // 在途预留标记：物品右上角按目标消费者优先级着色的小圆点
+        if (it.resv) {
+          const pri = cidPriority.has(it.resv) ? cidPriority.get(it.resv) : 1;
+          const col = (FG.Config.PRIORITIES[pri] || FG.Config.PRIORITIES[1]).color;
+          ctx.fillStyle = col;
+          ctx.beginPath();
+          ctx.arc(p0x + p.x * t + 5, p0y + p.y * t - 5, 2.2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+        }
       }
     }
     // 地面物料堆（拆除保留的物料）
@@ -420,6 +436,15 @@ FG.Renderer = (() => {
         const first = items[0];
         drawItem(ctx, first.type, cx, cy + 4, 9, 1);
       }
+    }
+
+    // 供料优先级徽标（仅实际放置的消费者建筑；幽灵/图标临时对象无 priority，不画）
+    if ((b.def.recipeBuilding || b.type === 'lab') && typeof b.priority === 'number' && b.priority !== 1) {
+      const pri = FG.Config.PRIORITIES[b.priority] || FG.Config.PRIORITIES[1];
+      ctx.fillStyle = pri.color;
+      ctx.beginPath();
+      ctx.arc(px + 6, py + 6, 3, 0, Math.PI * 2);
+      ctx.fill();
     }
 
     // 状态覆盖层
